@@ -2,8 +2,6 @@
 
 Local, AI-powered codebase documentation generator. Point it at any repository and get a Read-the-Docs themed Sphinx knowledge base — architecture deep-dives, dependency analysis, inline code snippets, Mermaid diagrams, and incremental update support.
 
-Created by **Raghul R**.
-
 ---
 
 ## How it works
