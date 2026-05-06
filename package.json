@@ -1,0 +1,53 @@
+{
+  "name": "wiki-gen",
+  "version": "0.1.0",
+  "description": "Local, OpenCode SDK-powered codebase wiki generator. Point at a repo, get a Sphinx wiki.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Raghul R",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raghul-r/wiki-gen.git"
+  },
+  "keywords": [
+    "opencode",
+    "documentation",
+    "sphinx",
+    "readthedocs",
+    "wiki",
+    "codebase-analysis"
+  ],
+  "files": [
+    "bin/",
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "wiki-gen": "./bin/wiki-gen.js",
+    "wiki-gen-watch": "./bin/wiki-gen-watch.js"
+  },
+  "scripts": {
+    "build": "tsc && cp -r src/prompts dist/",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.14.39",
+    "chalk": "^5.4.1",
+    "ora": "^8.2.0",
+    "yargs": "^17.7.2",
+    "ignore": "^7.0.3",
+    "fast-glob": "^3.3.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/yargs": "^17.0.33",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
