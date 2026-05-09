@@ -138,6 +138,10 @@ Each run produces a versioned `_docs_<commit-sha>` directory and appends an entr
 | `--model`, `-m` | _(config)_ | OpenCode model override in `provider/model` format |
 | `--dangerously-skip-permissions` | `false` | Auto-approve all AI permission requests. **Required for unattended runs.** |
 | `--targeted-pages` | _(all)_ | Comma-separated list of pages to (re)generate, e.g. `architecture,data-flow` |
+| `--concurrency` | `1` | Number of pages to generate in parallel. `1` = sequential (default, safest). Higher values cut wall-clock time on large repos. |
+| `--resume` | `false` | Skip pages whose output file already exists — resumes an interrupted run without starting from scratch |
+| `--clean` | `false` | Remove `_wiki_workspace/` from the target repo and exit without generating anything |
+| `--dry-run` | `false` | Print planned pages with quality targets and exit — no LLM calls made |
 | `--serve-port` | `33411` | Port for serving the built docs locally |
 | `--serve-only <path>` | — | Serve an existing built HTML directory without regenerating |
 | `--output`, `-o` | `_docs` | Output directory (relative to target or absolute) |

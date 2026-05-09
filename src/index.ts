@@ -97,6 +97,12 @@ async function runUpdatePass(config: WikiGenConfig): Promise<WikiGenResult> {
   config = prepared.config
   const targetPath = path.resolve(config.target)
 
+  // Derive the output directory consistently with runUpdateSession.
+  const isSphinx = config.format === "sphinx"
+  const sourceDir = isSphinx
+    ? path.join(path.resolve(config.output), "source")
+    : path.resolve(config.output)
+
   process.stderr.write(chalk.dim(`  Mode:    incremental update`) + "\n")
   process.stderr.write(chalk.dim(`  Range:   ${prepared.from.slice(0, 8)}..${prepared.to.slice(0, 8)}`) + "\n")
   process.stderr.write(chalk.dim(`  Changed: ${prepared.changedFiles.length} files`) + "\n")
@@ -105,7 +111,7 @@ async function runUpdatePass(config: WikiGenConfig): Promise<WikiGenResult> {
   let server: ServerInstance | undefined
   let result: WikiGenResult = {
     success: false,
-    outputDir: path.join(path.resolve(config.output), "source"),
+    outputDir: sourceDir,
     pagesGenerated: 0,
     duration: 0,
     errors: [],
@@ -114,9 +120,11 @@ async function runUpdatePass(config: WikiGenConfig): Promise<WikiGenResult> {
   try {
     await validateSafeOutputPath(targetPath, path.resolve(config.output))
 
-    const envSpinner = ora("Checking Python environment...").start()
-    await preparePythonEnv(config)
-    envSpinner.succeed("Python 3.10+ venv ready (_wikigen_env)")
+    if (isSphinx) {
+      const envSpinner = ora("Checking Python environment...").start()
+      await preparePythonEnv(config)
+      envSpinner.succeed("Python 3.10+ venv ready (_wikigen_env)")
+    }
 
     const serverSpinner = ora("Starting OpenCode server...").start()
     server = await startServer(config)
@@ -124,16 +132,18 @@ async function runUpdatePass(config: WikiGenConfig): Promise<WikiGenResult> {
 
     result = await runUpdateSession(server.client, config, prepared.affectedPages, prepared.changedFiles, prepared.diff, prepared.from, prepared.to)
 
-    const buildSpinner = ora("Building updated Sphinx site...").start()
-    const buildDir = await buildSphinx(config)
-    result.buildOutput = buildDir
-    buildSpinner.succeed(`Site built at ${buildDir}`)
+    if (isSphinx) {
+      const buildSpinner = ora("Building updated Sphinx site...").start()
+      const buildDir = await buildSphinx(config)
+      result.buildOutput = buildDir
+      buildSpinner.succeed(`Site built at ${buildDir}`)
+    }
 
     await generateVersionIndex(targetPath, config.output)
     await pruneVersions(targetPath, config.output, config.maxVersions)
 
     if (config.deployPath) {
-      execFileSync("rsync", ["-az", "--delete", `${buildDir}/`, config.deployPath], { stdio: config.verbose ? "inherit" : "pipe" })
+      execFileSync("rsync", ["-az", "--delete", `${result.buildOutput ?? sourceDir}/`, config.deployPath], { stdio: config.verbose ? "inherit" : "pipe" })
       process.stderr.write(chalk.green(`  Deployed:   ${config.deployPath}\n`))
     }
   } catch (err) {
@@ -204,6 +214,15 @@ async function runOnePass(config: WikiGenConfig): Promise<WikiGenResult> {
   }
 
   let server: ServerInstance | undefined
+
+  // Close the OpenCode server cleanly on Ctrl+C so it doesn't linger.
+  const sigintHandler = () => {
+    process.stderr.write(chalk.dim("\n  Interrupted — shutting down server...\n"))
+    server?.close()
+    process.exit(130)
+  }
+  process.once("SIGINT", sigintHandler)
+  process.once("SIGTERM", sigintHandler)
 
   try {
     // ── Phase 1: Scan ──────────────────────────────────
@@ -279,6 +298,8 @@ async function runOnePass(config: WikiGenConfig): Promise<WikiGenResult> {
     process.exitCode = 1
   } finally {
     server?.close()
+    process.off("SIGINT", sigintHandler)
+    process.off("SIGTERM", sigintHandler)
   }
 
   if (process.exitCode) return result

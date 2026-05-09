@@ -138,26 +138,26 @@ function extractMatches(content: string, patterns: RegExp[]): string[] {
   return Array.from(results)
 }
 
-function resolveImport(file: string, imp: string, topLevel: string[]): string | null {
+function resolveImport(file: string, imp: string, allFiles: string[]): string | null {
   // Python: from my_pkg.module import X → my_pkg/module.py
   if (imp.includes(".")) {
     const asPath = imp.replace(/\./g, "/")
     for (const suffix of [".py", "/__init__.py", ".ts", ".js", "/index.ts", "/index.js"]) {
       const candidate = asPath + suffix
-      if (topLevel.includes(candidate) || topLevel.some((f) => f.startsWith(candidate + "/"))) {
+      if (allFiles.includes(candidate) || allFiles.some((f) => f.startsWith(candidate + "/"))) {
         return candidate
       }
     }
   }
   // Direct file reference
-  for (const prefix of topLevel) {
+  for (const prefix of allFiles) {
     if (imp === prefix || imp.startsWith(prefix + "/") || prefix.startsWith(imp + "/")) {
       return prefix
     }
   }
   // Try with extensions
   for (const ext of [".py", ".ts", ".js", ".go", ".rs", ".java"]) {
-    if (topLevel.includes(imp + ext)) return imp + ext
+    if (allFiles.includes(imp + ext)) return imp + ext
   }
   return null
 }
@@ -172,7 +172,6 @@ export async function buildRelationshipGraph(
   scan: ScanResult,
 ): Promise<RelationshipGraph> {
   const nodes: Record<string, GraphNode> = {}
-  const fileSet = new Set(scan.files)
 
   const BATCH = 64
 

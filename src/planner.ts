@@ -221,8 +221,9 @@ function discoverModulePages(scan: ScanResult): PagePlan[] {
       })
       .sort((a, b) => b[1] - a[1])
 
-    // If 2+ significant subdirs exist, prefer them over the flat top-level page.
-    if (subDirs.length >= 2 && pages.length + subDirs.length <= MAX_PAGES) {
+    // If 2+ significant subdirs exist and there is room for at least 2 more pages,
+    // prefer them over a single flat top-level page.
+    if (subDirs.length >= 2 && MAX_PAGES - pages.length >= 2) {
       for (const [subDir, subCount] of subDirs.slice(0, MAX_PAGES - pages.length)) {
         const slug = subDir.toLowerCase().replace(/[^a-z0-9]+/g, "-")
         if (usedSlugs.has(slug)) continue

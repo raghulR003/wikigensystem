@@ -219,8 +219,6 @@ export async function scanCodebase(targetPath: string): Promise<ScanResult> {
     new Set(relativeFiles.map((f) => f.split("/")[0]!).filter(Boolean)),
   ).sort()
 
-  const complexity = complexityTier(relativeFiles.length, topLevel.length, 0)
-
   // Detect languages
   const langSet = new Set<string>()
   for (const file of relativeFiles) {
