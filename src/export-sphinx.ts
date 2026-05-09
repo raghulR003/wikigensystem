@@ -3,6 +3,7 @@ import fs from "node:fs/promises"
 import { execFileSync } from "node:child_process"
 import type { WikiGenConfig, ScanResult } from "./types.js"
 import { watermark, watermarkCredit, watermarkInline } from "./watermark.js"
+import { fileExists } from "./utils.js"
 
 /**
  * Scaffold a Sphinx documentation project from the generated markdown files.
@@ -311,10 +312,6 @@ export async function finalizeSphinxIndex(config: WikiGenConfig): Promise<void> 
   }
 
   await fs.writeFile(indexPath, existing + "\n" + toctree)
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  return fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false)
 }
 
 async function directoryExists(filePath: string): Promise<boolean> {

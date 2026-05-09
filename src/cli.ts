@@ -114,6 +114,26 @@ export function parseArgs(argv: string[] = process.argv): WikiGenConfig {
             type: "string",
             describe: "Comma-separated page list for partial regeneration (e.g., 'architecture,pipeline')",
           })
+          .option("concurrency", {
+            type: "number",
+            describe: "Number of pages to generate in parallel (default: 1 — sequential)",
+            default: 1,
+          })
+          .option("resume", {
+            type: "boolean",
+            describe: "Skip pages whose output file already exists — resume an interrupted run",
+            default: false,
+          })
+          .option("clean", {
+            type: "boolean",
+            describe: "Remove _wiki_workspace/ from the target repo and exit",
+            default: false,
+          })
+          .option("dry-run", {
+            type: "boolean",
+            describe: "Print planned pages and exit without calling the LLM",
+            default: false,
+          })
           .option("from", {
             type: "string",
             describe: "Incremental update base git commit/ref (update mode)",
@@ -265,5 +285,9 @@ export function parseArgs(argv: string[] = process.argv): WikiGenConfig {
     updateTo: (args.to as string | undefined) ?? "HEAD",
     deployPath: args.deploy as string | undefined,
     projectSlug: args["project-slug"] as string | undefined,
+    concurrency: Math.max(1, (args.concurrency as number) ?? 1),
+    resume: (args.resume as boolean) ?? false,
+    clean: (args.clean as boolean) ?? false,
+    dryRun: (args["dry-run"] as boolean) ?? false,
   }
 }

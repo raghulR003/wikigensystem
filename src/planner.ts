@@ -171,23 +171,26 @@ export function planPages(scan: ScanResult): PagePlan[] {
 
 /**
  * Discover module-specific documentation pages from the codebase structure.
- * Looks for significant directories that warrant their own deep-dive page.
+ * Looks at top-level directories first, then expands into subdirectories
+ * when a top-level dir has 2+ significant sub-modules (e.g. src/auth/, src/payments/).
  */
 function discoverModulePages(scan: ScanResult): PagePlan[] {
   const pages: PagePlan[] = []
   const files = scan.files ?? []
-  const topLevel = scan.topLevel ?? []
 
-  // Count files per top-level directory
+  // Count files per directory — both top-level and one level deep.
   const dirCounts = new Map<string, number>()
   for (const f of files) {
-    const first = f.split("/")[0]
-    if (first && !first.startsWith(".") && !first.startsWith("_")) {
-      dirCounts.set(first, (dirCounts.get(first) ?? 0) + 1)
+    const parts = f.split("/")
+    const first = parts[0]
+    if (!first || first.startsWith(".") || first.startsWith("_")) continue
+    dirCounts.set(first, (dirCounts.get(first) ?? 0) + 1)
+    if (parts.length >= 3 && parts[1] && !parts[1].startsWith(".") && !parts[1].startsWith("_")) {
+      const sub = `${first}/${parts[1]}`
+      dirCounts.set(sub, (dirCounts.get(sub) ?? 0) + 1)
     }
   }
 
-  // Identify significant modules (>3 files, not config/docs/tests)
   const skipDirs = new Set([
     "node_modules", "venv", ".venv", "__pycache__", ".git", "dist", "build",
     "docs", "doc", "test", "tests", "spec", "specs", "fixtures", "mocks",
@@ -195,37 +198,79 @@ function discoverModulePages(scan: ScanResult): PagePlan[] {
     "assets", "public", "migrations",
   ])
 
-  const significantDirs = [...dirCounts.entries()]
-    .filter(([dir, count]) => count >= 3 && !skipDirs.has(dir.toLowerCase()))
+  const isSkipped = (name: string) => skipDirs.has(name.toLowerCase())
+
+  // Significant top-level dirs (>= 3 files, not in skip list)
+  const significantTopLevel = [...dirCounts.entries()]
+    .filter(([dir, count]) => !dir.includes("/") && count >= 3 && !isSkipped(dir))
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)  // Max 6 module pages to keep scope manageable
+    .slice(0, 8)
 
-  for (const [dir, fileCount] of significantDirs) {
-    // Generate a readable page name from the directory
-    const slug = dir.toLowerCase().replace(/[^a-z0-9]+/g, "-")
-    const title = dir.charAt(0).toUpperCase() + dir.slice(1).replace(/[_-]/g, " ")
+  const MAX_PAGES = 6
+  const usedSlugs = new Set<string>()
 
-    pages.push({
-      filename: `${slug}.md`,
-      title: `${title} Module`,
-      sourcePatterns: [`${dir}/**`],
-      minWords: fileCount > 10 ? 2000 : 1200,
-      minSnippets: Math.min(fileCount, 8),
-      minDiagrams: 2,
-      brief: [
-        `Deep-dive into the ${title} module (${dir}/ directory, ${fileCount} files).`,
-        `Must include:`,
-        `- Purpose and responsibility of this module within the larger system`,
-        `- Internal architecture diagram (Mermaid) showing how files within ${dir}/ relate to each other`,
-        `- Walkthrough of the most important files with inline code snippets`,
-        `- External dependencies: what does this module import from other parts of the codebase?`,
-        `- What depends on this module? What would break if it changed?`,
-        `- Error handling patterns specific to this module`,
-        `- Design decisions and trade-offs`,
-        `Read ALL files under ${dir}/ before writing.`,
-      ].join("\n"),
-    })
+  for (const [dir, fileCount] of significantTopLevel) {
+    if (pages.length >= MAX_PAGES) break
+
+    // Check for significant subdirectories within this top-level dir.
+    const subDirs = [...dirCounts.entries()]
+      .filter(([d, count]) => {
+        if (!d.startsWith(`${dir}/`) || d.split("/").length !== 2) return false
+        const subName = d.split("/")[1]!
+        return count >= 3 && !isSkipped(subName)
+      })
+      .sort((a, b) => b[1] - a[1])
+
+    // If 2+ significant subdirs exist, prefer them over the flat top-level page.
+    if (subDirs.length >= 2 && pages.length + subDirs.length <= MAX_PAGES) {
+      for (const [subDir, subCount] of subDirs.slice(0, MAX_PAGES - pages.length)) {
+        const slug = subDir.toLowerCase().replace(/[^a-z0-9]+/g, "-")
+        if (usedSlugs.has(slug)) continue
+        usedSlugs.add(slug)
+        const label = subDir.split("/")
+          .map((p) => p.charAt(0).toUpperCase() + p.slice(1).replace(/[_-]/g, " "))
+          .join(" › ")
+        pages.push({
+          filename: `${slug}.md`,
+          title: `${label} Module`,
+          sourcePatterns: [`${subDir}/**`],
+          minWords: subCount > 10 ? 2000 : 1200,
+          minSnippets: Math.min(subCount, 8),
+          minDiagrams: 2,
+          brief: buildModuleBrief(label, subDir, subCount),
+        })
+      }
+    } else {
+      const slug = dir.toLowerCase().replace(/[^a-z0-9]+/g, "-")
+      if (usedSlugs.has(slug)) continue
+      usedSlugs.add(slug)
+      const title = dir.charAt(0).toUpperCase() + dir.slice(1).replace(/[_-]/g, " ")
+      pages.push({
+        filename: `${slug}.md`,
+        title: `${title} Module`,
+        sourcePatterns: [`${dir}/**`],
+        minWords: fileCount > 10 ? 2000 : 1200,
+        minSnippets: Math.min(fileCount, 8),
+        minDiagrams: 2,
+        brief: buildModuleBrief(title, dir, fileCount),
+      })
+    }
   }
 
   return pages
+}
+
+function buildModuleBrief(title: string, dir: string, fileCount: number): string {
+  return [
+    `Deep-dive into the ${title} module (${dir}/ directory, ${fileCount} files).`,
+    `Must include:`,
+    `- Purpose and responsibility of this module within the larger system`,
+    `- Internal architecture diagram (Mermaid) showing how files within ${dir}/ relate to each other`,
+    `- Walkthrough of the most important files with inline code snippets`,
+    `- External dependencies: what does this module import from other parts of the codebase?`,
+    `- What depends on this module? What would break if it changed?`,
+    `- Error handling patterns specific to this module`,
+    `- Design decisions and trade-offs`,
+    `Read ALL files under ${dir}/ before writing.`,
+  ].join("\n")
 }

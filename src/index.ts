@@ -30,6 +30,8 @@ import { seedBlackboard, runSession } from "./session.js"
 import { scaffoldSphinx, preparePythonEnv, buildSphinx, finalizeSphinxIndex, generateVersionIndex } from "./export-sphinx.js"
 import { prepareIncrementalUpdate, runUpdateSession } from "./update.js"
 import { watermark } from "./watermark.js"
+import { fileExists, isPortInUse } from "./utils.js"
+import { planPages } from "./planner.js"
 import type { WikiGenResult, ScanResult, WikiGenConfig } from "./types.js"
 
 function gitCommit(targetPath: string): string {
@@ -53,6 +55,16 @@ async function main(): Promise<void> {
   if (config.serveOnly) {
     await serveExistingDocs(config)
     return
+  }
+
+  if (config.clean) {
+    await cleanWorkspace(config)
+    process.exit(0)
+  }
+
+  if (config.dryRun) {
+    await runDryRun(config)
+    process.exit(0)
   }
 
   if (config.mode === "update") {
@@ -297,46 +309,45 @@ async function runOnePass(config: WikiGenConfig): Promise<WikiGenResult> {
 // ── Static file server ────────────────────────────────────────────────────
 
 function serveDocs(buildDir: string, port: number, verbose: boolean): void {
-  try {
-    execFileSync("lsof", ["-ti", `:${port}`], { stdio: "pipe" })
-    process.stderr.write(chalk.yellow(`\n  ⚠ Port ${port} is in use. Skipping serve.\n`))
-    process.stderr.write(chalk.dim(`    Manual: wiki-gen <target> --serve-only ${buildDir} --serve-port <free-port>\n\n`))
-    return
-  } catch {
-    // Port is free.
-  }
-
-  const root = path.resolve(buildDir)
-  const server = createServer((req, res) => {
-    void serveStaticRequest(root, req.url ?? "/", res, verbose)
-  })
-
-  server.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EADDRINUSE") {
+  void isPortInUse(port).then((inUse) => {
+    if (inUse) {
       process.stderr.write(chalk.yellow(`\n  ⚠ Port ${port} is in use. Skipping serve.\n`))
+      process.stderr.write(chalk.dim(`    Manual: wiki-gen <target> --serve-only ${buildDir} --serve-port <free-port>\n\n`))
       return
     }
-    process.stderr.write(chalk.red(`\n  Server error: ${err.message}\n`))
-    process.exitCode = 1
-  })
 
-  serverStarted = true
-
-  server.listen(port, "127.0.0.1", () => {
-    process.stderr.write(chalk.bold.green(`\n  🌐 Documentation live at: `) + chalk.cyan.underline(`http://localhost:${port}`) + "\n")
-    process.stderr.write(chalk.dim(`     Serving ${root}\n`))
-    process.stderr.write(chalk.dim(`     Press Ctrl+C to stop the server\n\n`))
-  })
-
-  const cleanup = () => {
-    server.close(() => {
-      process.stderr.write(chalk.dim("\n  Server stopped.\n"))
-      process.exit(0)
+    const root = path.resolve(buildDir)
+    const server = createServer((req, res) => {
+      void serveStaticRequest(root, req.url ?? "/", res, verbose)
     })
-  }
 
-  process.once("SIGINT", cleanup)
-  process.once("SIGTERM", cleanup)
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        process.stderr.write(chalk.yellow(`\n  ⚠ Port ${port} is in use. Skipping serve.\n`))
+        return
+      }
+      process.stderr.write(chalk.red(`\n  Server error: ${err.message}\n`))
+      process.exitCode = 1
+    })
+
+    serverStarted = true
+
+    server.listen(port, "127.0.0.1", () => {
+      process.stderr.write(chalk.bold.green(`\n  🌐 Documentation live at: `) + chalk.cyan.underline(`http://localhost:${port}`) + "\n")
+      process.stderr.write(chalk.dim(`     Serving ${root}\n`))
+      process.stderr.write(chalk.dim(`     Press Ctrl+C to stop the server\n\n`))
+    })
+
+    const cleanup = () => {
+      server.close(() => {
+        process.stderr.write(chalk.dim("\n  Server stopped.\n"))
+        process.exit(0)
+      })
+    }
+
+    process.once("SIGINT", cleanup)
+    process.once("SIGTERM", cleanup)
+  })
 }
 
 async function serveStaticRequest(root: string, rawUrl: string, res: ServerResponse, verbose: boolean): Promise<void> {
@@ -475,8 +486,52 @@ function formatDuration(ms: number): string {
   return `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
-  return fs.stat(filePath).then((s) => s.isFile()).catch(() => false)
+async function cleanWorkspace(config: WikiGenConfig): Promise<void> {
+  const targetPath = path.resolve(config.target)
+  const workspacePath = path.join(targetPath, "_wiki_workspace")
+  const spinner = ora("Cleaning workspace...").start()
+
+  let removed = 0
+  if (await fs.stat(workspacePath).then((s) => s.isDirectory()).catch(() => false)) {
+    await fs.rm(workspacePath, { recursive: true, force: true })
+    removed++
+  }
+
+  if (removed === 0) {
+    spinner.info("Nothing to clean — _wiki_workspace/ does not exist.")
+  } else {
+    spinner.succeed(`Removed _wiki_workspace/ from ${targetPath}`)
+  }
+}
+
+async function runDryRun(config: WikiGenConfig): Promise<void> {
+  const targetPath = path.resolve(config.target)
+
+  const scanSpinner = ora("Scanning codebase...").start()
+  const scan = await scanCodebase(targetPath)
+  scanSpinner.succeed(
+    `${scan.count} files • ${scan.languages.length} languages • ${scan.complexity} complexity • ~${scan.totalLines.toLocaleString()} lines`,
+  )
+
+  const pages = planPages(scan)
+
+  process.stderr.write("\n" + chalk.bold("Dry Run — Planned Pages") + "\n")
+  process.stderr.write(chalk.dim("─".repeat(62)) + "\n")
+  for (const [i, page] of pages.entries()) {
+    process.stderr.write(
+      `  ${chalk.cyan(String(i + 1).padStart(2))}. ${chalk.bold(page.filename.padEnd(36))} ${page.title}\n`,
+    )
+    if (page.sourcePatterns.length > 0) {
+      process.stderr.write(chalk.dim(`       patterns: ${page.sourcePatterns.join(", ")}\n`))
+    }
+    process.stderr.write(
+      chalk.dim(`       targets:  ${page.minWords} words, ${page.minSnippets}+ snippets, ${page.minDiagrams}+ diagrams\n`),
+    )
+  }
+  process.stderr.write("\n")
+  process.stderr.write(chalk.dim(`  ${pages.length} pages planned  •  depth: ${config.depth}  •  format: ${config.format}\n`))
+  process.stderr.write(chalk.dim(`  Languages: ${scan.languages.join(", ")}\n\n`))
+  process.stderr.write(chalk.dim("  Run without --dry-run to generate documentation.\n\n"))
 }
 
 async function validateSafeOutputPath(targetPath: string, outputPath: string): Promise<void> {

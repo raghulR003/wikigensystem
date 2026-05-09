@@ -2,10 +2,12 @@ import path from "node:path"
 import fs from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
-import type { WikiGenConfig, PipelineState, WikiGenResult, ScanResult } from "./types.js"
+import type { WikiGenConfig, WikiGenResult, ScanResult } from "./types.js"
 import { buildRelationshipGraph, serializeGraphForPrompt } from "./graph.js"
 import { watermark } from "./watermark.js"
 import { planPages, type PagePlan } from "./planner.js"
+import { glob as fastGlob } from "fast-glob"
+import { parseModel, fileExists } from "./utils.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PROMPTS_DIR = path.resolve(__dirname, "prompts")
@@ -82,13 +84,6 @@ export async function seedBlackboard(
 function getContentOutputPath(config: WikiGenConfig): string {
   const outputRoot = path.resolve(config.output)
   return config.format === "sphinx" ? path.join(outputRoot, "source") : outputRoot
-}
-
-function parseModel(model?: string): { providerID: string; modelID: string } | undefined {
-  if (!model) return undefined
-  const [providerID, ...rest] = model.split("/")
-  if (!providerID || rest.length === 0) throw new Error(`Model must be in provider/model format, received: ${model}`)
-  return { providerID, modelID: rest.join("/") }
 }
 
 // ── Permission handling ─────────────────────────────────────────────────────
@@ -314,8 +309,7 @@ async function resolveTopSourceFiles(page: PagePlan, targetPath: string, maxFile
     const clean = pattern.replace(/\*\*/g, "").replace(/\*/g, "").replace(/\/?$/, "")
     const globPattern = clean.includes("*") ? clean : `${clean}/**`
     try {
-      const { glob } = await import("fast-glob")
-      const matches = await glob(globPattern, { cwd: targetPath, onlyFiles: true, dot: false })
+      const matches = await fastGlob(globPattern, { cwd: targetPath, onlyFiles: true, dot: false })
       for (const m of matches) {
         try {
           const stat = await fs.stat(path.join(targetPath, m))
@@ -479,10 +473,6 @@ async function writeFallbackCeoBrief(briefPath: string, pages: PagePlan[], black
 async function countPages(outputPath: string): Promise<number> {
   const entries = await fs.readdir(outputPath, { recursive: true }).catch(() => [])
   return entries.filter((e): e is string => typeof e === "string" && e.endsWith(".md")).length
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  return fs.stat(filePath).then((stat) => stat.isFile()).catch(() => false)
 }
 
 async function readCompact(filePath: string, maxChars: number): Promise<string> {
@@ -650,6 +640,16 @@ export async function runSession(
   // Plan pages
   const pages = planPages(scan)
 
+  // Validate --targeted-pages against known page slugs and warn on typos.
+  if (config.targetedPages && config.targetedPages.length > 0) {
+    const knownSlugs = pages.map((p) => p.filename.replace(/\.md$/, "")).filter((s) => s !== "_wiki_meta")
+    const unknown = config.targetedPages.filter((p) => !knownSlugs.includes(p))
+    if (unknown.length > 0) {
+      process.stderr.write(`  ⚠ Unknown targeted pages: ${unknown.join(", ")}\n`)
+      process.stderr.write(`    Known pages: ${knownSlugs.join(", ")}\n\n`)
+    }
+  }
+
   if (config.verbose) {
     process.stderr.write(`[session] Planned ${pages.length} pages\n`)
   }
@@ -663,28 +663,6 @@ export async function runSession(
   const perPageTimeout = config.depth === "deep" ? 10 * 60 * 1000
     : config.depth === "standard" ? 6 * 60 * 1000
     : 4 * 60 * 1000
-
-  // Create a single session (context is managed by using fresh prompts)
-  const sessionRes = await client.session.create({
-    directory: targetPath,
-    title: `wiki-gen: ${path.basename(targetPath)}`,
-    permission: [
-      { permission: "read", pattern: "*", action: "allow" },
-      { permission: "question", pattern: "*", action: "allow" },
-      { permission: "write", pattern: "_wiki_workspace/*", action: "allow" },
-      { permission: "write", pattern: path.relative(targetPath, outputPath).split(path.sep).join("/") + "/*", action: "allow" },
-      { permission: "external_directory", pattern: "*", action: "deny" },
-    ],
-  })
-  const sessionID = sessionRes.data?.id
-  if (!sessionID) throw new Error("Failed to create OpenCode session")
-
-  if (config.verbose) {
-    process.stderr.write(`[session] Session created: ${sessionID}\n`)
-  }
-
-  // Event stream for display + permission handling.
-  wikiGenSessionIDs.add(sessionID)
 
   const eventAbort = new AbortController()
   const events = await client.event.subscribe({ directory: targetPath }, { signal: eventAbort.signal })
@@ -721,30 +699,44 @@ export async function runSession(
     if (!allDone) errors.push(`event loop: ${String(err)}`)
   })
 
-  // ── Generate each page in its own prompt ────────────────────────────────
+  // ── Generate pages (sequential or concurrent pool) ──────────────────────
 
-  let completedPages = 0
+  const concurrency = Math.max(1, config.concurrency ?? 1)
   const totalPages = pages.length
+  let completedPages = 0
+  let pageCounter = 0
 
-  for (const page of pages) {
+  const processPage = async (page: PagePlan): Promise<void> => {
+    const myNum = ++pageCounter
     const pageStart = Date.now()
-    const label = `[${completedPages + 1}/${totalPages}] ${page.filename}`
+    const label = `[${myNum}/${totalPages}] ${page.filename}`
 
     process.stderr.write(`\n  📝 ${label}\n`)
 
-    // Check if already exists (from a previous run / targeted regen)
+    // Skip pages not in --targeted-pages
     if (config.targetedPages && config.targetedPages.length > 0) {
       const pageName = page.filename.replace(/\.md$/, "")
       if (!config.targetedPages.includes(pageName)) {
         process.stderr.write(`  ⏭ Skipped (not in targeted pages)\n`)
         completedPages++
-        continue
+        return
+      }
+    }
+
+    const expectedPath = path.join(outputPath, page.filename)
+
+    // --resume: skip pages that already have meaningful output
+    if (config.resume) {
+      const existing = await fs.stat(expectedPath).catch(() => null)
+      if (existing && existing.size > 100) {
+        process.stderr.write(`  ⏭ ${label} — resumed (${(existing.size / 1024).toFixed(1)}KB)\n`)
+        completedPages++
+        return
       }
     }
 
     const graphSlice = await buildGraphSlice(page, blackboardPath)
     const prompt = buildPagePrompt(page, targetPath, outputPath, blackboardPath, pages, ceoBrief, graphSlice)
-    const expectedPath = path.join(outputPath, page.filename)
 
     try {
       // Each page gets a FRESH session to avoid context accumulation
@@ -779,9 +771,7 @@ export async function runSession(
       // Verify file was created
       const exists = await fs.stat(expectedPath).catch(() => null)
       if (exists) {
-        const size = exists.size
-        const elapsed = ((Date.now() - pageStart) / 1000).toFixed(0)
-        process.stderr.write(`  ✅ ${label} (${(size / 1024).toFixed(1)}KB, ${elapsed}s)\n`)
+        process.stderr.write(`  ✅ ${label} (${(exists.size / 1024).toFixed(1)}KB, ${((Date.now() - pageStart) / 1000).toFixed(0)}s)\n`)
         completedPages++
       } else {
         process.stderr.write(`  ⚠️ ${label} — file not created\n`)
@@ -822,10 +812,9 @@ export async function runSession(
           if (retryExists) {
             process.stderr.write(`  ✅ ${retryLabel} (${(retryExists.size / 1024).toFixed(1)}KB)\n`)
             completedPages++
-            continue  // skip error push below
-          } else {
-            process.stderr.write(`  ⚠️ ${retryLabel} — still not created\n`)
+            return
           }
+          process.stderr.write(`  ⚠️ ${retryLabel} — still not created\n`)
         } catch (retryErr) {
           process.stderr.write(`  ❌ ${retryLabel} — ${retryErr instanceof Error ? retryErr.message : String(retryErr)}\n`)
         }
@@ -845,6 +834,24 @@ export async function runSession(
       process.stderr.write(`  ❌ ${label} — ${msg}\n`)
       errors.push(`${page.filename}: ${msg}`)
     }
+  }
+
+  if (concurrency === 1) {
+    for (const page of pages) {
+      await processPage(page)
+    }
+  } else {
+    process.stderr.write(`\n  ⚡ Concurrency: ${concurrency} pages in parallel\n`)
+    const queue = [...pages]
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, pages.length) }, async () => {
+        while (queue.length > 0) {
+          const page = queue.shift()
+          if (!page) break
+          await processPage(page)
+        }
+      }),
+    )
   }
 
   // Clean up

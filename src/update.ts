@@ -4,16 +4,10 @@ import { execFileSync } from "node:child_process"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import type { ScanResult, WikiGenConfig, WikiGenResult } from "./types.js"
 import { planPages, type PagePlan } from "./planner.js"
+import { parseModel } from "./utils.js"
 
 function git(target: string, args: string[]): string {
   return execFileSync("git", args, { cwd: target, encoding: "utf-8", maxBuffer: 50 * 1024 * 1024 }).trim()
-}
-
-function parseModel(model?: string): { providerID: string; modelID: string } | undefined {
-  if (!model) return undefined
-  const [providerID, ...rest] = model.split("/")
-  if (!providerID || rest.length === 0) throw new Error(`Model must be in provider/model format, received: ${model}`)
-  return { providerID, modelID: rest.join("/") }
 }
 
 export async function prepareIncrementalUpdate(config: WikiGenConfig): Promise<{ config: WikiGenConfig; from: string; to: string; changedFiles: string[]; diff: string; affectedPages: PagePlan[] }> {
@@ -34,7 +28,8 @@ export async function prepareIncrementalUpdate(config: WikiGenConfig): Promise<{
     process.stderr.write(`  No source changes detected between ${from.slice(0, 8)} and ${to.slice(0, 8)}.\n`)
   }
 
-  const updateConfig = { ...config, output: newOutput, format: "sphinx" as const, buildSite: true, prepareEnv: true }
+  // Respect the user's format setting; update mode does not force sphinx.
+  const updateConfig = { ...config, output: newOutput }
   const scan = await import("./scanner.js").then((m) => m.scanCodebase(target))
   const affectedPages = selectAffectedPages(scan, changedFiles)
 
@@ -91,7 +86,10 @@ function selectAffectedPages(scan: ScanResult, changedFiles: string[]): PagePlan
 export async function runUpdateSession(client: OpencodeClient, config: WikiGenConfig, affectedPages: PagePlan[], changedFiles: string[], diff: string, from: string, to: string): Promise<WikiGenResult> {
   const start = Date.now()
   const target = path.resolve(config.target)
-  const sourceDir = path.join(path.resolve(config.output), "source")
+  // Derive source dir from format: sphinx uses a source/ subdirectory, markdown does not.
+  const sourceDir = config.format === "sphinx"
+    ? path.join(path.resolve(config.output), "source")
+    : path.resolve(config.output)
   const errors: string[] = []
 
   if (affectedPages.length === 0) {

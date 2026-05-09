@@ -118,39 +118,47 @@ const SRC_EXTS = new Set([
   ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".cpp",
   ".c", ".h", ".swift", ".kt", ".rb", ".php", ".scala", ".cs", ".ex", ".exs",
 ])
+
+async function countFileLines(filePath: string): Promise<number> {
+  try {
+    const rl = readline.createInterface({ input: createReadStream(filePath), crlfDelay: Infinity })
+    let lines = 0
+    for await (const _ of rl) lines++
+    return lines
+  } catch {
+    return 0
+  }
+}
+
 async function estimateCodeLines(root: string, files: string[]): Promise<number> {
   const srcFiles = files.filter((f) => SRC_EXTS.has(path.extname(f).toLowerCase()))
   if (srcFiles.length === 0) return 0
 
-  // Get file sizes (fast stat, no read), pick the 80 largest to sample.
-  // Do not cap before sorting; a large file may be late alphabetically.
-  const sized: Array<{ file: string; size: number }> = []
-  for (const rel of srcFiles) {
-    try {
-      const s = await fs.stat(path.join(root, rel))
-      sized.push({ file: rel, size: s.size })
-    } catch { /* skip */ }
-  }
+  // Stat all source files in parallel, pick the 80 largest to sample.
+  const sized = (await Promise.all(
+    srcFiles.map(async (rel) => {
+      try {
+        const s = await fs.stat(path.join(root, rel))
+        return { file: rel, size: s.size }
+      } catch {
+        return null
+      }
+    }),
+  )).filter((x): x is { file: string; size: number } => x !== null)
+
   sized.sort((a, b) => b.size - a.size)
   const sample = sized.slice(0, 80)
-
-  let totalLines = 0
-  for (const { file } of sample) {
-    try {
-      const rl = readline.createInterface({
-        input: createReadStream(path.join(root, file)),
-        crlfDelay: Infinity,
-      })
-      let lines = 0
-      for await (const _ of rl) lines++
-      totalLines += lines
-    } catch { /* skip */ }
-  }
-
-  // Extrapolate: if we sampled N files and got L lines, estimate total = L * (total / N)
   if (sample.length === 0) return 0
+
+  // Count lines in parallel across sampled files.
+  const lineCounts = await Promise.all(
+    sample.map(({ file }) => countFileLines(path.join(root, file))),
+  )
+  const totalSampleLines = lineCounts.reduce((sum, n) => sum + n, 0)
+
+  // Extrapolate to the full set.
   const ratio = srcFiles.length / sample.length
-  return Math.round(totalLines * ratio)
+  return Math.round(totalSampleLines * ratio)
 }
 
 /**

@@ -47,6 +47,14 @@ export interface WikiGenConfig {
   deployPath?: string
   /** Optional project slug/metadata for portal deployment */
   projectSlug?: string
+  /** Max parallel page-generation sessions (default: 1) */
+  concurrency: number
+  /** Skip pages whose output file already exists — resume a previously interrupted run */
+  resume: boolean
+  /** Remove _wiki_workspace/ from the target repo and exit */
+  clean: boolean
+  /** Print planned pages and exit without calling the LLM */
+  dryRun: boolean
 }
 
 export interface ScanResult {

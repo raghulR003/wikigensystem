@@ -174,31 +174,43 @@ export async function buildRelationshipGraph(
   const nodes: Record<string, GraphNode> = {}
   const fileSet = new Set(scan.files)
 
-  // Pass 1: extract imports, exports, symbols from each file
-  for (const rel of scan.files) {
-    const lang = detectLanguage(rel)
-    const patterns = PATTERNS[lang]
-    if (!patterns) continue
+  const BATCH = 64
 
-    const filePath = path.join(root, rel)
-    let content: string
-    try {
-      content = await fs.readFile(filePath, "utf-8")
-    } catch {
-      continue
-    }
+  // Pass 1: extract imports, exports, symbols — parallelised in batches
+  for (let i = 0; i < scan.files.length; i += BATCH) {
+    const batch = scan.files.slice(i, i + BATCH)
+    const results = await Promise.all(batch.map(async (rel) => {
+      const lang = detectLanguage(rel)
+      const patterns = PATTERNS[lang]
+      if (!patterns) return null
 
-    const imports = extractMatches(content, patterns.imports)
-    const exports = extractMatches(content, patterns.exports)
-    const definedSymbols = extractMatches(content, patterns.symbols)
+      const filePath = path.join(root, rel)
+      let content: string
+      try {
+        content = await fs.readFile(filePath, "utf-8")
+      } catch {
+        return null
+      }
 
-    nodes[rel] = {
-      file: rel,
-      language: lang,
-      imports,
-      exports,
-      definedSymbols,
-      referencedBy: [],
+      return {
+        rel,
+        lang,
+        imports: extractMatches(content, patterns.imports),
+        exports: extractMatches(content, patterns.exports),
+        definedSymbols: extractMatches(content, patterns.symbols),
+      }
+    }))
+
+    for (const result of results) {
+      if (!result) continue
+      nodes[result.rel] = {
+        file: result.rel,
+        language: result.lang,
+        imports: result.imports,
+        exports: result.exports,
+        definedSymbols: result.definedSymbols,
+        referencedBy: [],
+      }
     }
   }
 
